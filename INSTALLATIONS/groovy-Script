@@ -1,0 +1,153 @@
+def COLOR_MAP = [
+    'SUCCESS': 'good', 
+    'FAILURE': 'danger',
+]
+pipeline {
+  agent any
+  tools {
+      maven "maven4"
+      jdk "myjdk"
+  }
+
+    stages {
+      stage('Fetch code') {
+          steps {
+              git branch: 'master', url: 'https://github.com/tech-house31/sampleapplication.git'
+          }
+
+      }
+
+      stage('compile') {
+          steps {
+              sh 'mvn compile'
+          }
+
+      }
+
+      stage('unit-test') {
+          steps {
+              sh 'mvn test'
+          }
+      }
+        
+      stage('code-review') {
+          steps{
+               sh 'mvn -P metrics pmd:pmd'
+          }
+      }
+        
+      stage('code-coverage') {
+          steps{
+              sh 'mvn verify'
+          }
+      }
+        
+      stage('Checkstyle Analysis') {
+          steps {
+              sh 'mvn checkstyle:checkstyle'
+          }
+      }
+        
+      stage('packaging') {
+          steps{
+              sh 'mvn install -DskipTests'
+          }
+            
+          post {
+              success {
+                  echo 'Now Archiving it...'
+                  archiveArtifacts artifacts: '/target/*.war'
+              }
+          }
+      }
+        
+      stage('Sonar Analysis') {
+          environment {
+              scannerHome = tool 'sonar4'
+          }
+          steps {
+              withSonarQubeEnv('mysonar') {
+                  sh '''${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=sampleapp \
+                  -Dsonar.projectName=sampleapp \
+                  -Dsonar.projectVersion=1.0 \
+                  -Dsonar.sources=src/ \
+                  -Dsonar.java.binaries=target/test-classes/com/devopsdemo/utilities/ \
+                  -Dsonar.junit.reportsPath=target/surefire-reports/ \
+                  -Dsonar.jacoco.reportsPath=target/jacoco.exec \
+                  -Dsonar.java.checkstyle.reportPaths=target/checkstyle-result.xml'''
+              }
+          }
+      }
+        
+      stage("Quality Gate") {
+          steps {
+              timeout(time: 1, unit: 'HOURS') {
+                  // Parameter indicates whether to set pipeline to UNSTABLE if Quality Gate fails
+                  // true = set pipeline to UNSTABLE, false = don't
+                  waitForQualityGate abortPipeline: true
+              }
+          }
+      }
+        
+      stage("UploadArtifact") {
+          steps{
+              nexusArtifactUploader(
+                  nexusVersion: 'nexus3',
+                  protocol: 'http',
+                  nexusUrl: '172.31.23.96:8081',
+                  groupId: 'Dev',
+                  version: "${env.BUILD_ID}-${env.BUILD_TIMESTAMP}",
+                  repository: 'sample-repo',
+                  credentialsId: 'nexuslogin',
+                  artifacts: [
+                    [artifactId: 'sampleapp',
+                     classifier: '',
+                     file: 'target/sampleapp.war',
+                     type: 'war']
+                  ]
+              )
+          }
+      }
+        
+      stage ('Deployment') {
+          steps{
+              deploy adapters: [tomcat8(credentialsId: 'tomcatlogin', path: '', url: 'http://172.31.91.43:8080')], contextPath: null, war: '/*.war'
+          }
+      }
+        
+      stage('Build docker image') {
+          steps{
+              script{
+                    sh 'docker build -t techhouse32/sampleapp:V$BUILD_NUMBER .'
+              }
+          }
+      }
+      stage('Deploy to docker hub') {
+          steps {
+              withCredentials([string(credentialsId: 'dockerid', variable: 'dockeraccountlogin')]) {
+                  sh "docker login -u techhouse32 -p ${dockeraccountlogin}"
+                  sh 'docker push techhouse32/sampleapp:V$BUILD_NUMBER'
+              }
+            
+          }
+      }
+        
+      stage('Run Container'){
+          steps {
+              sh 'docker run -itd --name myapp1 -p 90:8080 techhouse32/sampleapp:V$BUILD_NUMBER'
+            
+          }
+      }
+    }
+
+    post {
+        always {
+            echo 'Slack Notifications.'
+            slackSend channel: '#sampleproject',
+                color: COLOR_MAP[currentBuild.currentResult],
+                message: "*${currentBuild.currentResult}:* Job ${env.JOB_NAME} build ${env.BUILD_NUMBER} \n More info at: ${env.BUILD_URL}"
+        }
+    }
+
+
+}
